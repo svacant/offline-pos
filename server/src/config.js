@@ -19,8 +19,16 @@ export function loadConfig(env = process.env) {
     throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
   }
 
+  // Sandbox by default: only Stripe test-mode keys are accepted unless live
+  // mode is explicitly allowed.
+  const livemode = /^(sk|rk)_live_/.test(env.STRIPE_SECRET_KEY);
+  if (livemode && env.ALLOW_LIVE_MODE !== 'true') {
+    throw new Error('STRIPE_SECRET_KEY is a live key: use a test key (sk_test_...) or set ALLOW_LIVE_MODE=true');
+  }
+
   return {
     port: intFromEnv(env, 'PORT', 8080),
+    livemode,
     stripeSecretKey: env.STRIPE_SECRET_KEY,
     webhookSecret: env.STRIPE_WEBHOOK_SECRET || null,
     posApiKey: env.POS_API_KEY,

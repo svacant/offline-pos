@@ -7,7 +7,7 @@ const stripe = new Stripe(config.stripeSecretKey);
 const app = createApp({ config, stripe });
 
 app.listen(config.port, () => {
-  console.log(`offline-pos server listening on :${config.port}`);
+  console.log(`offline-pos server listening on :${config.port} (${config.livemode ? 'LIVE' : 'sandbox / test mode'})`);
   if (!config.locationId) {
     console.warn('STRIPE_LOCATION_ID is not set: run `npm run setup:terminal` and set it before connecting readers.');
   }

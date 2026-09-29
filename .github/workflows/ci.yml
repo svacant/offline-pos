@@ -3,6 +3,7 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 jobs:
   server:
@@ -29,12 +30,28 @@ jobs:
         working-directory: app
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-java@v4
         with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: app/package-lock.json
-      - run: npm ci
-      - run: npm run typecheck
-      - run: npm run lint
-      - run: npm test
+          distribution: temurin
+          java-version: 17
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.47.5
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: dart format --output=none --set-exit-if-changed lib test
+      - run: flutter analyze
+      - run: flutter test
+      # Sandbox APK. Set the repository variable POS_BACKEND_URL and the
+      # secret POS_API_KEY to point it at the deployed backend.
+      - name: Build APK
+        run: >
+          flutter build apk --release
+          --dart-define=POS_BACKEND_URL=${{ vars.POS_BACKEND_URL }}
+          --dart-define=POS_API_KEY=${{ secrets.POS_API_KEY }}
+          --dart-define=STRIPE_LOCATION_ID=${{ vars.STRIPE_LOCATION_ID }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: offline-pos-apk
+          path: app/build/app/outputs/flutter-apk/app-release.apk

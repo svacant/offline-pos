@@ -64,6 +64,7 @@ test('config exposes location, currency and offline limits', async () => {
   const res = await fetch(`${base}/config`, { headers: auth });
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), {
+    livemode: false,
     locationId: 'tml_123',
     currency: 'eur',
     offline: { maxTransactionAmount: 5000, maxStoredAmount: 100000 },
@@ -91,6 +92,13 @@ test('webhook rejects bad signatures and forwards payment events', async () => {
   assert.equal(good.status, 200);
   assert.equal(events.length, 1);
   assert.equal(events[0].data.object.metadata.pos_tx_id, 'tx_1');
+});
+
+test('loadConfig refuses live keys unless explicitly allowed', () => {
+  const live = { STRIPE_SECRET_KEY: 'sk_live_x', POS_API_KEY: 'y' };
+  assert.throws(() => loadConfig(live), /live key/);
+  assert.equal(loadConfig({ ...live, ALLOW_LIVE_MODE: 'true' }).livemode, true);
+  assert.equal(loadConfig({ STRIPE_SECRET_KEY: 'rk_test_x', POS_API_KEY: 'y' }).livemode, false);
 });
 
 test('loadConfig validates required variables and amounts', () => {

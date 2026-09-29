@@ -63,6 +63,7 @@ export function createApp({ config, stripe, logger = console, onPaymentEvent = (
 
   app.get('/config', requireDevice, (_req, res) => {
     res.json({
+      livemode: config.livemode,
       locationId: config.locationId,
       currency: config.currency,
       offline: config.offline,
