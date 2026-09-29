@@ -1,0 +1,37 @@
+# Builds the POS app in the Expo cloud. Requires the EXPO_TOKEN repository
+# secret and the EXPO_PUBLIC_* values configured as EAS environment variables.
+name: EAS build
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: EAS build profile
+        type: choice
+        options: [preview, production, development]
+        default: preview
+      platform:
+        description: Platform
+        type: choice
+        options: [android, ios, all]
+        default: android
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+      - run: npm ci
+      - run: eas build --non-interactive --no-wait --profile ${{ inputs.profile }} --platform ${{ inputs.platform }}

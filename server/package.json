@@ -1,0 +1,21 @@
+{
+  "name": "offline-pos-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Backend for the offline-first POS: Stripe Terminal connection tokens, POS config and webhooks",
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "setup:terminal": "node scripts/setup-terminal.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "express": "^5.2.1",
+    "stripe": "^22.6.2"
+  }
+}

@@ -1,0 +1,25 @@
+# Render Blueprint: deploys the POS backend from server/Dockerfile.
+# Secrets marked sync:false are asked for in the Render dashboard.
+services:
+  - type: web
+    name: offline-pos-server
+    runtime: docker
+    rootDir: server
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    healthCheckPath: /health
+    envVars:
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: STRIPE_LOCATION_ID
+        sync: false
+      - key: POS_API_KEY
+        generateValue: true
+      - key: POS_CURRENCY
+        value: eur
+      - key: OFFLINE_MAX_TRANSACTION_AMOUNT
+        value: "10000"
+      - key: OFFLINE_MAX_STORED_AMOUNT
+        value: "100000"
