@@ -21,13 +21,19 @@ class FakeTerminal implements TerminalApi {
   final charges = <Map<String, Object>>[];
   Completer<void>? holdCharge;
 
+  /// Thrown by [initialize] when set, e.g. to simulate a platform without the bridge.
+  Object? initializeError;
+
   void emit(TerminalEvent event) => controller.add(event);
 
   @override
   Stream<TerminalEvent> get events => controller.stream;
 
   @override
-  Future<Map<Object?, Object?>> initialize(Future<String> Function() tokenProvider) async => initialStatus;
+  Future<Map<Object?, Object?>> initialize(Future<String> Function() tokenProvider) async {
+    if (initializeError != null) throw initializeError!;
+    return initialStatus;
+  }
 
   @override
   Future<void> discoverReaders({required ReaderLink link, required bool simulated}) async {}

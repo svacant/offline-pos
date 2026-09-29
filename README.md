@@ -2,6 +2,8 @@
 
 POS offline-first in **Flutter** con pinpad per l'importo e pagamenti con carta tramite **Stripe Terminal in modalità offline**. Tutto gira in **sandbox** (Stripe test mode, lettore simulato).
 
+> **Workshop**: la guida per chi partecipa (architettura, percorso di lettura del codice, concetti ed esercizi) è in [WORKSHOP.md](WORKSHOP.md).
+
 ```
 app/         App Flutter (Android) + bridge nativo Kotlin verso l'SDK Stripe Terminal
 server/      Backend Node: connection token, configurazione POS, webhook

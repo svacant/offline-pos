@@ -13,9 +13,8 @@ import 'ui/reader_screen.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Stripe Terminal needs location and Bluetooth before initialising.
-  await [Permission.locationWhenInUse, Permission.bluetoothScan, Permission.bluetoothConnect].request();
-
+  // Wiring: the real implementations are created here and handed to the
+  // controller. Tests hand it fakes instead (see test/fakes.dart).
   final backend = Backend();
   final controller = PosController(
     terminal: MethodChannelTerminal(),
@@ -23,8 +22,24 @@ Future<void> main() async {
     fetchConfig: backend.fetchConfig,
     fetchConnectionToken: backend.fetchConnectionToken,
   );
+
+  // Show the UI first, then ask for permissions: the system dialogs appear
+  // over the app instead of over a black screen.
   runApp(PosApp(controller: controller));
-  await controller.start();
+
+  // Stripe Terminal needs location to take payments, Bluetooth to reach the
+  // reader (Android 12+ asks for the two Bluetooth permissions separately).
+  final statuses = await [
+    Permission.locationWhenInUse,
+    Permission.bluetoothScan,
+    Permission.bluetoothConnect,
+  ].request();
+  final denied = [
+    for (final e in statuses.entries)
+      if (!e.value.isGranted) e.key,
+  ];
+
+  await controller.start(missingPermissions: denied.isNotEmpty);
 }
 
 class PosApp extends StatelessWidget {

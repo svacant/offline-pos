@@ -25,9 +25,11 @@ void main() {
       expect(pressKey(12, PinPadKey.d3, max: 100), 12);
     });
 
-    test('digit keys map to their value', () {
-      for (var i = 0; i <= 9; i++) {
-        expect(PinPadKey.digit(i).label, '$i');
+    test('digit keys carry the value shown on them', () {
+      final digits = PinPadKey.values.where((k) => k.digit != null);
+      expect(digits.length, 10);
+      for (final key in digits) {
+        expect(key.label, '${key.digit}');
       }
     });
   });

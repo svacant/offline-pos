@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 
 import 'config.dart';
 import 'ledger.dart';
@@ -81,7 +82,7 @@ class PosController extends ChangeNotifier {
 
   /// Restores local state first so the POS is usable without network, then
   /// initialises the SDK and tries to refresh the config.
-  Future<void> start() async {
+  Future<void> start({bool missingPermissions = false}) async {
     ledger = await _storage.loadLedger();
     final cached = await _storage.loadConfig();
     if (cached != null) {
@@ -90,12 +91,19 @@ class PosController extends ChangeNotifier {
     }
     notifyListeners();
 
+    // Listen before initialising, so no event from the SDK is missed.
     _subscription = _terminal.events.listen(_onEvent);
     try {
       final status = await _terminal.initialize(_fetchConnectionToken);
       offline = OfflineSnapshot.fromBridge(status, config.currency);
+      if (missingPermissions) {
+        initError = 'Permessi posizione/Bluetooth negati: abilitali nelle impostazioni per usare il lettore.';
+      }
     } on TerminalError catch (e) {
       initError = 'Stripe Terminal non inizializzato: ${e.message}';
+    } on MissingPluginException {
+      // The native bridge exists only on Android (see README).
+      initError = 'Stripe Terminal non disponibile su questa piattaforma: usa Android.';
     }
     ready = true;
     notifyListeners();
@@ -237,7 +245,15 @@ class PosController extends ChangeNotifier {
     }
   }
 
-  Future<void> cancelCharge() => _terminal.cancelCollect();
+  /// Asks the reader to stop waiting for the card. [charge] then completes
+  /// with a canceled result.
+  Future<void> cancelCharge() async {
+    try {
+      await _terminal.cancelCollect();
+    } on TerminalError catch (e) {
+      debugPrint('Annullamento non riuscito: ${e.message}');
+    }
+  }
 
   /// Returns an error message, or null on success.
   Future<String?> discover(ReaderLink link, {required bool simulated}) async {
@@ -255,7 +271,11 @@ class PosController extends ChangeNotifier {
   }
 
   Future<void> cancelDiscovery() async {
-    await _terminal.cancelDiscovery();
+    try {
+      await _terminal.cancelDiscovery();
+    } on TerminalError catch (e) {
+      debugPrint('Stop ricerca non riuscito: ${e.message}');
+    }
     discovering = false;
     notifyListeners();
   }
@@ -277,10 +297,15 @@ class PosController extends ChangeNotifier {
     }
   }
 
-  Future<void> disconnect() async {
-    await _terminal.disconnectReader();
+  Future<String?> disconnect() async {
+    try {
+      await _terminal.disconnectReader();
+    } on TerminalError catch (e) {
+      return e.message;
+    }
     connectedReader = null;
     notifyListeners();
+    return null;
   }
 
   Future<String?> simulateOffline(bool value) async {

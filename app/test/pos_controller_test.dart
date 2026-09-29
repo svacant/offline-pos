@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:offline_pos/src/config.dart';
 import 'package:offline_pos/src/ledger.dart';
@@ -177,5 +178,29 @@ void main() {
     final error = await pos.connect(const ReaderInfo(serialNumber: 'SIM-1'), ReaderLink.bluetooth);
     expect(error, contains('Location'));
     expect(pos.connectedReader, isNull);
+  });
+
+  test('start survives a platform without the native bridge', () async {
+    terminal.initializeError = MissingPluginException('initialize');
+    pos = PosController(
+      terminal: terminal,
+      storage: storage,
+      fetchConfig: () async => remoteConfig,
+      fetchConnectionToken: () async => 'x',
+    );
+    await pos.start();
+    expect(pos.ready, isTrue);
+    expect(pos.initError, contains('Android'));
+  });
+
+  test('start reports missing permissions', () async {
+    pos = PosController(
+      terminal: terminal,
+      storage: storage,
+      fetchConfig: () async => remoteConfig,
+      fetchConnectionToken: () async => 'x',
+    );
+    await pos.start(missingPermissions: true);
+    expect(pos.initError, contains('Permessi'));
   });
 }

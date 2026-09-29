@@ -68,7 +68,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
                           },
                         ),
                       const SizedBox(height: 8),
-                      FilledButton.tonal(onPressed: _pos.disconnect, child: const Text('Scollega')),
+                      FilledButton.tonal(onPressed: () => _run(_pos.disconnect), child: const Text('Scollega')),
                     ],
                   ),
                 ),

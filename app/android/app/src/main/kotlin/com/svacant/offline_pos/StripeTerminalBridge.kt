@@ -43,15 +43,22 @@ import io.flutter.plugin.common.MethodChannel
 /**
  * Bridges the official Stripe Terminal Android SDK to Flutter
  * (lib/src/terminal_bridge.dart). No Flutter plugin supports Terminal's
- * offline mode, so the payment flow lives here:
+ * offline mode, so the payment flow lives here.
  *
- * - `offline_pos/terminal` method channel: Dart -> native calls, plus the
- *   native -> Dart `fetchConnectionToken` call.
- * - `offline_pos/terminal/events` event channel: offline status, forwarded
- *   payments, discovered readers and reader prompts.
+ * Two channels connect the worlds:
+ * - `offline_pos/terminal` (MethodChannel): Dart calls native methods and
+ *   awaits a single reply. Native also calls Dart on it to ask for a
+ *   connection token.
+ * - `offline_pos/terminal/events` (EventChannel): a stream of events the SDK
+ *   produces on its own (offline status, forwarded payments, readers found,
+ *   prompts for the cardholder).
  *
- * SDK callbacks arrive on background threads; every reply to Flutter is
- * posted to the main thread.
+ * Two Android rules shape the code:
+ * 1. SDK callbacks run on background threads, but Flutter channels must be
+ *    used on the main thread: every reply and event goes through [main].
+ * 2. `Terminal.init` runs once per process, while the Activity (and this
+ *    bridge) can be recreated. The listeners given to the SDK therefore live
+ *    in the companion object and forward to the bridge that is alive now.
  */
 class StripeTerminalBridge(private val context: Context, messenger: BinaryMessenger) :
     MethodChannel.MethodCallHandler, EventChannel.StreamHandler {
@@ -61,14 +68,27 @@ class StripeTerminalBridge(private val context: Context, messenger: BinaryMessen
     private val main = Handler(Looper.getMainLooper())
 
     private var sink: EventChannel.EventSink? = null
-    private var discoveredReaders: List<Reader> = emptyList()
-    private var discoveryTask: Cancelable? = null
-    private var collectTask: Cancelable? = null
+
+    // Written from SDK callback threads and read on the main thread:
+    // @Volatile makes every write visible to the other thread.
+    @Volatile private var discoveredReaders: List<Reader> = emptyList()
+    @Volatile private var discoveryTask: Cancelable? = null
+    @Volatile private var collectTask: Cancelable? = null
 
     init {
         methods.setMethodCallHandler(this)
         events.setStreamHandler(this)
+        current = this
     }
+
+    /** Called when the Flutter engine goes away (see MainActivity). */
+    fun detach() {
+        methods.setMethodCallHandler(null)
+        events.setStreamHandler(null)
+        if (current === this) current = null
+    }
+
+    // --- EventChannel ----------------------------------------------------
 
     override fun onListen(arguments: Any?, events: EventChannel.EventSink) {
         sink = events
@@ -81,6 +101,8 @@ class StripeTerminalBridge(private val context: Context, messenger: BinaryMessen
     private fun emit(event: Map<String, Any?>) {
         main.post { sink?.success(event) }
     }
+
+    // --- MethodChannel: Dart -> native -----------------------------------
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         val reply = MainThreadResult(result, main)
@@ -104,13 +126,14 @@ class StripeTerminalBridge(private val context: Context, messenger: BinaryMessen
                     override fun onFailure(e: TerminalException) = reply.error(e)
                 })
                 "collectPayment" -> collectPayment(
-                    (call.argument<Number>("amount")!!).toLong(),
+                    call.argument<Number>("amount")!!.toLong(),
                     call.argument<String>("currency")!!,
                     call.argument<String>("posTxId")!!,
                     reply,
                 )
                 "cancelCollect" -> cancel(collectTask, reply)
                 "setSimulatedOffline" -> {
+                    // Only affects simulated readers in test mode.
                     val mode = if (call.argument<Boolean>("offline") == true) {
                         SimulatedOfflineMode.OFFLINE_IMMEDIATE
                     } else {
@@ -129,64 +152,10 @@ class StripeTerminalBridge(private val context: Context, messenger: BinaryMessen
         }
     }
 
-    // --- Initialisation --------------------------------------------------
-
-    private val tokenProvider = object : ConnectionTokenProvider {
-        override fun fetchConnectionToken(callback: ConnectionTokenCallback) {
-            // The backend call lives in Dart (lib/src/config.dart).
-            main.post {
-                methods.invokeMethod("fetchConnectionToken", null, object : MethodChannel.Result {
-                    override fun success(result: Any?) {
-                        val token = result as? String
-                        if (token != null) {
-                            callback.onSuccess(token)
-                        } else {
-                            callback.onFailure(ConnectionTokenException("Empty connection token"))
-                        }
-                    }
-
-                    override fun error(code: String, message: String?, details: Any?) =
-                        callback.onFailure(ConnectionTokenException(message ?: code))
-
-                    override fun notImplemented() =
-                        callback.onFailure(ConnectionTokenException("No connection token provider"))
-                })
-            }
-        }
-    }
-
-    private val terminalListener = object : TerminalListener {
-        override fun onConnectionStatusChange(status: ConnectionStatus) {
-            emit(mapOf("type" to "connectionStatus", "status" to status.name))
-        }
-    }
-
-    private val offlineListener = object : OfflineListener {
-        override fun onOfflineStatusChange(offlineStatus: OfflineStatus) {
-            emit(mapOf("type" to "offlineStatus", "status" to offlineStatusMap(offlineStatus)))
-        }
-
-        override fun onPaymentIntentForwarded(paymentIntent: PaymentIntent, e: TerminalException?) {
-            emit(
-                mapOf(
-                    "type" to "paymentForwarded",
-                    "posTxId" to paymentIntent.metadata?.get(POS_TX_ID),
-                    "paymentIntentId" to paymentIntent.id,
-                    "status" to paymentIntent.status?.name?.lowercase(),
-                    "error" to e?.errorMessage,
-                )
-            )
-        }
-
-        override fun onForwardingFailure(e: TerminalException) {
-            emit(mapOf("type" to "forwardingFailure", "error" to e.errorMessage))
-        }
-    }
-
     private fun initialize(reply: MainThreadResult) {
         if (!Terminal.isInitialized()) {
             Terminal.init(
-                context,
+                context.applicationContext,
                 LogLevel.VERBOSE,
                 tokenProvider,
                 terminalListener,
@@ -198,21 +167,33 @@ class StripeTerminalBridge(private val context: Context, messenger: BinaryMessen
         reply.success(offlineStatusMap(Terminal.getInstance().offlineStatus))
     }
 
-    // --- Readers ---------------------------------------------------------
+    // --- MethodChannel: native -> Dart -----------------------------------
 
-    private val readerListener = object : MobileReaderListener {
-        override fun onRequestReaderDisplayMessage(message: ReaderDisplayMessage) {
-            emit(mapOf("type" to "readerMessage", "message" to message.name))
-        }
+    /** Asks Dart (lib/src/config.dart) for a connection token from the backend. */
+    private fun requestConnectionToken(callback: ConnectionTokenCallback) {
+        main.post {
+            methods.invokeMethod("fetchConnectionToken", null, object : MethodChannel.Result {
+                override fun success(result: Any?) {
+                    val token = result as? String
+                    if (token.isNullOrEmpty()) {
+                        callback.onFailure(ConnectionTokenException("Empty connection token"))
+                    } else {
+                        callback.onSuccess(token)
+                    }
+                }
 
-        override fun onRequestReaderInput(options: ReaderInputOptions) {
-            emit(mapOf("type" to "readerMessage", "message" to "INPUT"))
-        }
+                // Offline the backend is unreachable and Dart throws: that is
+                // expected, the SDK keeps working offline without a new token.
+                override fun error(code: String, message: String?, details: Any?) =
+                    callback.onFailure(ConnectionTokenException(message ?: code))
 
-        override fun onDisconnect(reason: DisconnectReason) {
-            emit(mapOf("type" to "disconnected", "reason" to reason.name))
+                override fun notImplemented() =
+                    callback.onFailure(ConnectionTokenException("No connection token provider"))
+            })
         }
     }
+
+    // --- Readers ---------------------------------------------------------
 
     private fun discoverReaders(link: String, simulated: Boolean, reply: MainThreadResult) {
         val config = when (link) {
@@ -228,12 +209,14 @@ class StripeTerminalBridge(private val context: Context, messenger: BinaryMessen
                     emit(mapOf("type" to "readers", "readers" to readers.map(::readerMap)))
                 }
             },
+            // Called when discovery ends: after a connection, a cancel or an error.
             object : Callback {
                 override fun onSuccess() = emit(mapOf("type" to "discoveryFinished", "error" to null))
                 override fun onFailure(e: TerminalException) =
                     emit(mapOf("type" to "discoveryFinished", "error" to e.errorMessage))
             },
         )
+        // Discovery keeps running: readers arrive as events, not as this reply.
         reply.success(null)
     }
 
@@ -243,6 +226,8 @@ class StripeTerminalBridge(private val context: Context, messenger: BinaryMessen
             reply.error("READER_NOT_FOUND", "Lettore $serialNumber non trovato: ripeti la ricerca")
             return
         }
+        // autoReconnectOnUnexpectedDisconnect = true: the SDK reconnects by
+        // itself if Bluetooth drops for a moment.
         val config = when (link) {
             "usb" -> ConnectionConfiguration.UsbConnectionConfiguration(locationId, true, readerListener)
             else -> ConnectionConfiguration.BluetoothConnectionConfiguration(locationId, true, readerListener)
@@ -256,15 +241,21 @@ class StripeTerminalBridge(private val context: Context, messenger: BinaryMessen
     // --- Payments ----------------------------------------------------------
 
     /**
-     * create -> collect -> confirm with PREFER_ONLINE: online when Stripe is
-     * reachable, otherwise the SDK stores the payment and forwards it later
-     * (reported through [OfflineListener.onPaymentIntentForwarded]).
+     * The three steps of a card-present payment:
+     * 1. create  – a PaymentIntent for the amount. With PREFER_ONLINE the SDK
+     *    creates it on Stripe when online, or locally when offline.
+     * 2. collect – the reader waits for the card (tap, insert or swipe).
+     * 3. confirm – online: Stripe authorises the card now. Offline: the SDK
+     *    stores the encrypted payment and forwards it later, reporting the
+     *    outcome through [OfflineListener.onPaymentIntentForwarded].
      */
     private fun collectPayment(amount: Long, currency: String, posTxId: String, reply: MainThreadResult) {
         val params = PaymentIntentParameters.Builder()
             .setAmount(amount)
             .setCurrency(currency)
             .setCaptureMethod(CaptureMethod.Automatic)
+            // Our own sale id: it lets the app match the forwarded payment
+            // with the sale in its local ledger.
             .setMetadata(mapOf(POS_TX_ID to posTxId))
             .build()
         val terminal = Terminal.getInstance()
@@ -278,18 +269,16 @@ class StripeTerminalBridge(private val context: Context, messenger: BinaryMessen
                             override fun onSuccess(paymentIntent: PaymentIntent) =
                                 reply.success(outcomeMap(paymentIntent))
 
-                            override fun onFailure(e: TerminalException) = reply.error(e)
+                            override fun onFailure(e: TerminalException) {
+                                cancelQuietly(e.paymentIntent ?: paymentIntent)
+                                reply.error(e)
+                            }
                         })
                     }
 
                     override fun onFailure(e: TerminalException) {
                         collectTask = null
-                        if (paymentIntent.id != null) {
-                            terminal.cancelPaymentIntent(paymentIntent, object : PaymentIntentCallback {
-                                override fun onSuccess(paymentIntent: PaymentIntent) {}
-                                override fun onFailure(e: TerminalException) {}
-                            })
-                        }
+                        cancelQuietly(paymentIntent)
                         reply.error(e)
                     }
                 })
@@ -297,6 +286,19 @@ class StripeTerminalBridge(private val context: Context, messenger: BinaryMessen
 
             override fun onFailure(e: TerminalException) = reply.error(e)
         }, CreateConfiguration(OfflineBehavior.PREFER_ONLINE))
+    }
+
+    /**
+     * Cancels a PaymentIntent that will not be completed, so it does not stay
+     * open on Stripe. Only online intents (with an id) exist on Stripe, and
+     * Stripe refuses to cancel one that already succeeded, so this is safe.
+     */
+    private fun cancelQuietly(paymentIntent: PaymentIntent) {
+        if (paymentIntent.id == null) return
+        Terminal.getInstance().cancelPaymentIntent(paymentIntent, object : PaymentIntentCallback {
+            override fun onSuccess(paymentIntent: PaymentIntent) {}
+            override fun onFailure(e: TerminalException) {}
+        })
     }
 
     private fun cancel(task: Cancelable?, reply: MainThreadResult) {
@@ -310,7 +312,7 @@ class StripeTerminalBridge(private val context: Context, messenger: BinaryMessen
         })
     }
 
-    // --- Serialisation -----------------------------------------------------
+    // --- Native objects -> maps Flutter can send over a channel ------------
 
     private fun offlineStatusMap(status: OfflineStatus): Map<String, Any?> = mapOf(
         "sdk" to detailsMap(status.sdk),
@@ -332,6 +334,7 @@ class StripeTerminalBridge(private val context: Context, messenger: BinaryMessen
     )
 
     private fun outcomeMap(paymentIntent: PaymentIntent): Map<String, Any?> {
+        // A payment collected offline has offlineDetails and no Stripe id yet.
         val offline = paymentIntent.offlineDetails
         val card = offline?.cardPresentDetails
         val online = paymentIntent.paymentMethod?.cardPresentDetails
@@ -343,7 +346,10 @@ class StripeTerminalBridge(private val context: Context, messenger: BinaryMessen
         )
     }
 
-    /** Delivers a method-channel reply on the main thread, exactly once. */
+    /**
+     * Delivers a method-channel reply on the main thread, exactly once
+     * (answering the same call twice crashes Flutter).
+     */
     private class MainThreadResult(private val result: MethodChannel.Result, private val main: Handler) {
         private var done = false
 
@@ -367,6 +373,10 @@ class StripeTerminalBridge(private val context: Context, messenger: BinaryMessen
         }
     }
 
+    /**
+     * Listeners handed to the SDK. They are created once per process, like
+     * the SDK itself, and forward to the bridge of the current Flutter engine.
+     */
     private companion object {
         const val POS_TX_ID = "pos_tx_id"
 
@@ -375,5 +385,65 @@ class StripeTerminalBridge(private val context: Context, messenger: BinaryMessen
             TerminalErrorCode.DECLINED_BY_READER,
             TerminalErrorCode.OFFLINE_TRANSACTION_DECLINED,
         )
+
+        @Volatile var current: StripeTerminalBridge? = null
+
+        fun emitToFlutter(event: Map<String, Any?>) {
+            current?.emit(event)
+        }
+
+        val tokenProvider = object : ConnectionTokenProvider {
+            override fun fetchConnectionToken(callback: ConnectionTokenCallback) {
+                val bridge = current
+                if (bridge == null) {
+                    callback.onFailure(ConnectionTokenException("App not running"))
+                } else {
+                    bridge.requestConnectionToken(callback)
+                }
+            }
+        }
+
+        val terminalListener = object : TerminalListener {
+            override fun onConnectionStatusChange(status: ConnectionStatus) {
+                emitToFlutter(mapOf("type" to "connectionStatus", "status" to status.name))
+            }
+        }
+
+        val offlineListener = object : OfflineListener {
+            override fun onOfflineStatusChange(offlineStatus: OfflineStatus) {
+                current?.let { it.emit(mapOf("type" to "offlineStatus", "status" to it.offlineStatusMap(offlineStatus))) }
+            }
+
+            override fun onPaymentIntentForwarded(paymentIntent: PaymentIntent, e: TerminalException?) {
+                emitToFlutter(
+                    mapOf(
+                        "type" to "paymentForwarded",
+                        "posTxId" to paymentIntent.metadata?.get(POS_TX_ID),
+                        "paymentIntentId" to paymentIntent.id,
+                        // e.g. SUCCEEDED -> "succeeded", as in the Stripe API.
+                        "status" to paymentIntent.status?.name?.lowercase(),
+                        "error" to e?.errorMessage,
+                    )
+                )
+            }
+
+            override fun onForwardingFailure(e: TerminalException) {
+                emitToFlutter(mapOf("type" to "forwardingFailure", "error" to e.errorMessage))
+            }
+        }
+
+        val readerListener = object : MobileReaderListener {
+            override fun onRequestReaderDisplayMessage(message: ReaderDisplayMessage) {
+                emitToFlutter(mapOf("type" to "readerMessage", "message" to message.name))
+            }
+
+            override fun onRequestReaderInput(options: ReaderInputOptions) {
+                emitToFlutter(mapOf("type" to "readerMessage", "message" to "INPUT"))
+            }
+
+            override fun onDisconnect(reason: DisconnectReason) {
+                emitToFlutter(mapOf("type" to "disconnected", "reason" to reason.name))
+            }
+        }
     }
 }
